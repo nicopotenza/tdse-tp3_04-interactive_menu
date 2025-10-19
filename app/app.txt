@@ -3,3 +3,13 @@
    sequential execution is only deviated from when an interrupt event occurs.
 
 ...
+
+task_dta_list[0].WCET = 10
+task_dta_list[1].WCET = 3
+
+Paso TP3-04-12
+
+g_app_runtime_us      = 14
+task_dta_list[0].WCET = 19
+task_dta_list[1].WCET = 1969 (cuando no imprime loggers)
+task_dta_list[1].WCET = 2692 (cuando imprime loggers)
