@@ -1,0 +1,206 @@
+Resumen del Funcionamiento General
+Este proyecto es una aplicación de "bare-metal" (sin sistema operativo) para un microcontrolador STM32. Implementa un sistema cooperativo básico disparado por eventos y basado en tiempo.
+
+El núcleo del sistema es un bucle principal (main.c) que llama a un gestor de aplicación (app.c). Este gestor funciona como un planificador simple que ejecuta periódicamente una lista de tareas. La base de tiempo del sistema la proporciona la interrupción SysTick.
+
+El sistema tiene dos tareas principales:
+
+task_sensor: Lee el estado de tres botones (ENT, NEX, ESC). Implementa un antirrebote (debounce) por software y, cuando detecta una pulsación o liberación válida, envía un "evento" a una cola.
+
+task_menu: Gestiona una pantalla LCD. Está en un estado "inactivo" (IDLE) hasta que recibe un evento (de task_sensor) desde la cola. Cuando recibe un evento de "botón presionado", pasa a un estado "activo" (ACTIVE) y actualiza un contador en la pantalla LCD cada 500ms.
+
+La comunicación entre las tareas (sensor -> menú) se realiza de forma asíncrona mediante una cola FIFO (First-In, First-Out) implementada en task_menu_interface.c.
+
+Análisis por Archivo
+main.c
+Es el punto de entrada de la aplicación.
+
+main():
+
+Inicializa el hardware de bajo nivel (HAL_Init(), SystemClock_Config()).
+
+Inicializa los periféricos específicos: GPIO (MX_GPIO_Init) y USART2 (probablemente para logs/debug).
+
+Llama a app_init() una vez para inicializar la capa de aplicación y todas las tareas.
+
+Entra en un bucle infinito (while(1)) donde llama continuamente a app_update(). Este es el bucle principal del planificador.
+
+stm32f1xx_it.c
+Maneja las interrupciones del sistema.
+
+SysTick_Handler(): Es la interrupción más importante para este sistema. Se ejecuta periódicamente (generalmente cada 1 milisegundo, por defecto en HAL).
+
+Llama a HAL_IncTick(), que es el temporizador estándar de HAL.
+
+Llama a HAL_SYSTICK_IRQHandler(). Esta función no es estándar de HAL; es una función definida por el usuario en app.c. Este es el "corazón" (heartbeat) del sistema.
+
+EXTI15_10_IRQHandler(): Maneja la interrupción del pin B1_Pin (el botón de usuario azul en muchas placas Nucleo), aunque la lógica de lectura de botones en task_sensor.c parece estar basada en sondeo (polling), no en interrupciones.
+
+app.c
+Es el planificador de tareas y el núcleo de la aplicación.
+
+task_cfg_list[]: Un arreglo que define las tareas del sistema: task_sensor y task_menu. Cada tarea tiene una función _init y una _update.
+
+app_init():
+
+Inicializa el contador de ciclos (DWT) para medir tiempos de ejecución precisos.
+
+Recorre task_cfg_list y llama a la función _init de cada tarea (task_sensor_init(), task_menu_init()).
+
+Inicializa los contadores de "ticks" globales a 0: g_app_tick_cnt, g_task_sensor_tick_cnt, g_task_menu_tick_cnt.
+
+app_update():
+
+Verifica si g_app_tick_cnt es mayor que 0. Este contador es incrementado por la interrupción de SysTick.
+
+Si es > 0, significa que ha pasado un "tick" del sistema. Decrementa el contador e inicia la ejecución de las tareas.
+
+Reinicia g_app_runtime_us a 0.
+
+Recorre la lista de tareas (task_cfg_list):
+
+Mide el tiempo de inicio.
+
+Llama a la función _update de la tarea (ej. task_sensor_update(), luego task_menu_update()).
+
+Mide el tiempo de fin y calcula la duración (cycle_counter_time_us).
+
+Acumula este tiempo en g_app_runtime_us.
+
+Actualiza el WCET (Worst-Case Execution Time) de esa tarea si el tiempo actual es el peor (más alto) registrado hasta ahora.
+
+HAL_SYSTICK_Callback(): Esta es la función llamada por la ISR SysTick_Handler. Su única función es incrementar los tres contadores de ticks, dando "permiso" para que el bucle app_update y las tareas se ejecuten.
+
+task_sensor.c
+Gestiona la lectura y el antirrebote (debounce) de los botones.
+
+task_sensor_cfg_list[]: Configura 3 botones (ENT, NEX, ESC) con sus pines, estado presionado y tiempo de antirrebote (DEL_BTN_XX_MAX = 50 ticks, o 50ms).
+
+task_sensor_update(): Se ejecuta en cada tick del sistema (llamado desde app_update). Comprueba su propio contador g_task_sensor_tick_cnt y, si es > 0, lo decrementa y llama a task_sensor_statechart().
+
+task_sensor_statechart(): Es una máquina de estados de antirrebote.
+
+Lee el estado físico del pin del botón.
+
+Pasa por los estados: ST_BTN_XX_UP (liberado), ST_BTN_XX_FALLING (transición a presionado), ST_BTN_XX_DOWN (presionado), ST_BTN_XX_RISING (transición a liberado).
+
+Solo considera un botón "presionado" o "liberado" después de que el estado se mantenga estable durante los 50 ticks (50ms) definidos.
+
+Cuando se confirma una transición (ej. a ST_BTN_XX_DOWN), llama a put_event_task_menu() para enviar un evento (ej. EV_MEN_ENT_ACTIVE) a la cola del menú.
+
+task_menu_interface.c
+Implementa una cola de eventos (un buffer circular o FIFO) muy simple.
+
+put_event_task_menu(event): Añade un evento a la cola. Usado por task_sensor.
+
+get_event_task_menu(): Obtiene el siguiente evento de la cola. Usado por task_menu.
+
+any_event_task_menu(): Verifica si la cola tiene eventos pendientes.
+
+task_menu.c
+Gestiona la lógica de la aplicación y la pantalla LCD.
+
+task_menu_init():
+
+Inicializa la cola de eventos.
+
+Inicializa el displayInit() (el driver del LCD).
+
+Muestra un mensaje de bienvenida en el LCD.
+
+task_menu_update(): Similar a task_sensor_update, se ejecuta en cada tick del sistema y llama a task_menu_statechart().
+
+task_menu_statechart(): Es la máquina de estados del menú.
+
+Primero, comprueba si hay eventos en la cola (any_event_task_menu()).
+
+ST_MEN_XX_IDLE (Estado Inactivo):
+
+Espera a recibir un evento EV_MEN_ENT_ACTIVE (botón "Enter" presionado).
+
+Cuando lo recibe, pasa al estado ST_MEN_XX_ACTIVE y activa un temporizador de 500 ticks (DEL_MEN_XX_MAX = 500ul).
+
+ST_MEN_XX_ACTIVE (Estado Activo):
+
+Si recibe EV_MEN_ENT_IDLE (botón "Enter" liberado), vuelve al estado IDLE.
+
+Mientras tanto, decrementa su temporizador (tick--).
+
+Cuando el temporizador llega a 0 (DEL_MEN_XX_MIN), actualiza la pantalla LCD con el valor de g_task_menu_cnt/1000 (un contador que se incrementa cada segundo) y reinicia el temporizador a 500.
+
+task_menu_attribute.h
+Archivo de cabecera que define las estructuras de datos, estados (task_menu_st_t) y eventos (task_menu_ev_t) usados por task_menu.
+
+display.c
+Driver de bajo nivel para controlar una pantalla LCD de caracteres (tipo HD44780) en modo de 4 bits. Proporciona funciones como displayInit, displayCharPositionWrite y displayStringWrite.
+
+Evolución de las Variables
+A continuación, se detalla la evolución de las variables solicitadas desde el inicio en app_init() y durante las ejecuciones de app_update().
+
+g_app_runtime_us (unidad: microsegundos)
+Archivo: app.c
+
+Definición: Es el tiempo total de ejecución de todas las tareas (task_sensor_update + task_menu_update) dentro de un único ciclo de SysTick.
+
+Inicialización: No se inicializa explícitamente en app_init(), pero su valor no importa, ya que se reinicia en cada ciclo.
+
+Evolución en app_update():
+
+Al comienzo del bucle while (b_time_update_required) (es decir, en cada tick), se reinicia a 0 (g_app_runtime_us = 0;).
+
+Se ejecuta task_sensor_update(). El tiempo que tarda (ej. 5µs) se mide y se suma: g_app_runtime_us ahora vale 5.
+
+Se ejecuta task_menu_update(). El tiempo que tarda (ej. 12µs) se mide y se suma: g_app_runtime_us ahora vale 17 (5 + 12).
+
+Al final del bucle for, g_app_runtime_us contiene la suma del tiempo de ejecución de todas las tareas (17µs en este ejemplo).
+
+En la siguiente interrupción de SysTick, el proceso se repite y la variable se reinicia a 0.
+
+Propósito: Medir la carga de CPU total por cada tick del sistema.
+
+task_dta_list[index].WCET (unidad: microsegundos)
+Archivo: app.c
+
+Definición: Es el Tiempo de Ejecución del Peor Caso (Worst-Case Execution Time). task_dta_list[0].WCET almacena el tiempo máximo de task_sensor y task_dta_list[1].WCET el de task_menu.
+
+Inicialización en app_init(): Se inicializa a 0 para todas las tareas.
+
+Evolución en app_update():
+
+Se mide el tiempo de ejecución actual de una tarea (ej. task_sensor_update tarda 5µs).
+
+Se compara el tiempo actual (5µs) con el WCET almacenado (que al inicio es 0).
+
+Como 5 > 0, el WCET se actualiza: task_dta_list[0].WCET = 5;.
+
+En el siguiente tick, task_sensor_update tarda 4µs. Se compara: 4 < 5. El WCET no se modifica.
+
+En otro tick, la tarea tarda 7µs (quizás porque entró en una rama if más compleja). Se compara: 7 > 5. El WCET se actualiza a 7.
+
+Propósito: Esta variable solo aumenta y registra el tiempo máximo que ha tardado una tarea en ejecutarse desde que se encendió el dispositivo. Es vital para análisis de tiempo real.
+
+g_task_test_tick_cnt
+Esta variable (g_task_test_tick_cnt) no existe en ninguno de los archivos de código fuente proporcionados.
+
+Es probable que sea un error tipográfico y te refieras a g_task_sensor_tick_cnt o g_task_menu_tick_cnt. Explicaré el funcionamiento de estas, ya que es idéntico para ambas.
+
+g_task_sensor_tick_cnt y g_task_menu_tick_cnt (unidad: ticks de SysTick)
+Archivos: Declaradas en task_sensor.c y task_menu.c. Incrementadas en app.c.
+
+Definición: Son contadores que "autorizan" la ejecución de la máquina de estados de cada tarea.
+
+Inicialización en app_init(): Se inicializan a 0.
+
+Evolución:
+
+En la ISR (HAL_SYSTICK_Callback en app.c): Cada vez que ocurre una interrupción de SysTick, ambos contadores se incrementan en 1 (g_task_sensor_tick_cnt++, g_task_menu_tick_cnt++).
+
+En el bucle principal (task_sensor_update en task_sensor.c):
+
+La función comprueba si g_task_sensor_tick_cnt > 0.
+
+Si es así, lo decrementa en 1 (g_task_sensor_tick_cnt--) y ejecuta su máquina de estados (task_sensor_statechart()).
+
+(Lo mismo ocurre para g_task_menu_tick_cnt en task_menu_update).
+
+Propósito: Este es un mecanismo de sincronización fundamental. Asegura que, aunque la interrupción de SysTick incremente el contador (en contexto de interrupción), la lógica de la tarea solo se ejecute una vez por cada tick desde el bucle principal (contexto de hilo). Desacopla la interrupción del procesamiento de la tarea.

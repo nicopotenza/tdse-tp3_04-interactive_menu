@@ -1,0 +1,97 @@
+Análisis del Funcionamiento del Código Fuente
+El código sigue implementando un planificador cooperativo simple. Los archivos app.c, task_sensor.c y task_menu.c mantienen la misma lógica de planificación basada en ticks de SysTick que en el análisis anterior. La novedad es la inclusión de logger.c y logger.h.
+
+logger.c y logger.h
+Estos archivos implementan un sistema de registro (logging) para depuración.
+
+logger.h:
+
+Define las macros LOGGER_INFO y LOGGER_LOG.
+
+Habilita el logging (LOGGER_CONFIG_ENABLE = 1) y configura su uso con "semihosting" (LOGGER_CONFIG_USE_SEMIHOSTING = 1).
+
+La macro LOGGER_LOG es la parte más importante:
+
+Ejecuta __asm("CPSID i") para deshabilitar globalmente todas las interrupciones.
+
+Formatea el mensaje de log usando snprintf.
+
+Llama a logger_log_print_ para imprimir el mensaje.
+
+Ejecuta __asm("CPSIE i") para volver a habilitar las interrupciones.
+
+logger.c:
+
+Implementa logger_log_print_.
+
+Dado que se usa semihosting, esta función llama a printf(msg) y fflush(stdout).
+
+Punto clave: El "semihosting" es un mecanismo de depuración donde el microcontrolador envía datos (como texto) al PC anfitrión a través del depurador (ej. ST-Link). Esta operación es extremadamente lenta (puede tardar cientos de milisegundos) porque requiere detener el CPU, comunicarse con el depurador y esperar una respuesta.
+
+app.c
+Es el planificador principal.
+
+app_init(): Ahora utiliza LOGGER_INFO para imprimir mensajes de bienvenida y el estado de inicialización.
+
+app_update(): No utiliza LOGGER_INFO en su bucle principal. Sigue midiendo el tiempo de ejecución de las tareas (g_app_runtime_us) y el peor caso (WCET).
+
+HAL_SYSTICK_Callback(): Sigue incrementando los contadores de ticks (g_app_tick_cnt, g_task_sensor_tick_cnt, g_task_menu_tick_cnt) en cada interrupción.
+
+task_sensor.c
+Maneja la lógica de los botones (antirrebote).
+
+task_sensor_init(): Utiliza LOGGER_INFO para registrar que la tarea se ha inicializado y el estado inicial de sus variables.
+
+task_sensor_update(): No utiliza LOGGER_INFO. Su lógica de máquina de estados permanece intacta.
+
+task_menu.c
+Maneja la lógica del menú y la pantalla LCD.
+
+task_menu_init(): Utiliza LOGGER_INFO para registrar la inicialización de la tarea y sus variables.
+
+task_menu_update(): No utiliza LOGGER_INFO. Su máquina de estados para actualizar el LCD sigue funcionando igual.
+
+Impacto de LOGGER_INFO() en las Variables
+Antes de analizar el impacto, debo aclarar que la variable g_task_test_tick_cnt no existe en ninguno de los archivos de código fuente proporcionados. Es probable que te refieras a los contadores de ticks existentes: g_app_tick_cnt, g_task_sensor_tick_cnt y g_task_menu_tick_cnt. El análisis se centrará en estas últimas.
+
+1. Impacto Actual (Tal como está el código)
+En el código actual, las llamadas a LOGGER_INFO ocurren exclusivamente dentro de las funciones _init (app_init, task_sensor_init, task_menu_init). Estas funciones se ejecutan una sola vez al inicio del programa, antes de que el bucle principal app_update comience a ejecutarse y a medir tiempos.
+
+g_app_runtime_us (unidad: microsegundos)
+
+Impacto: NINGUNO.
+
+Razón: Esta variable mide el tiempo de ejecución sumado de las tareas dentro de app_update. Dado que LOGGER_INFO no se llama en app_update ni en task_sensor_update o task_menu_update, no afecta a esta medición.
+
+task_dta_list[index].WCET (unidad: microsegundos)
+
+Impacto: NINGUNO.
+
+Razón: Esta variable mide el "Peor Tiempo de Ejecución" de las funciones _update. Por la misma razón anterior, como los logs solo están en _init, el WCET medido reflejará únicamente el tiempo de la lógica de las tareas, no el del logging.
+
+g_app_tick_cnt, g_task_sensor_tick_cnt, g_task_menu_tick_cnt (unidad: ticks)
+
+Impacto: NINGUNO.
+
+Razón: Aunque las llamadas a LOGGER_INFO en app_init deshabilitan las interrupciones y tardan mucho tiempo, esto ocurre antes de que el sistema de ticks sea relevante. Los contadores se inicializan a 0 después de la mayoría de los logs, justo antes de terminar app_init.
+
+2. Impacto Hipotético (Si LOGGER_INFO se usara en _update)
+Si se modificara el código para añadir una llamada a LOGGER_INFO() dentro de task_sensor_update o task_menu_update, el impacto sería catastrófico para el sistema.
+
+g_app_runtime_us y task_dta_list[index].WCET
+
+Impacto: GIGANTESCO.
+
+Razón: Al llamar a LOGGER_INFO, la función logger_log_print_ ejecutaría printf vía semihosting, lo cual es muy lento. La medición del tiempo de ejecución (cycle_counter_get_time_us()) se dispararía de unos pocos microsegundos a cientos de miles de microsegundos (milisegundos).
+
+g_app_runtime_us y el WCET de la tarea que loguea reflejarían este tiempo enorme, dando una falsa (aunque técnicamente correcta) métrica de carga de CPU.
+
+g_app_tick_cnt, g_task_sensor_tick_cnt, g_task_menu_tick_cnt
+
+Impacto: DESTRUCCIÓN TOTAL DEL SISTEMA DE TIEMPO.
+
+Razón: La macro LOGGER_LOG deshabilita las interrupciones (__asm("CPSID i")) mientras dura toda la operación de printf.
+
+Si el printf tarda, por ejemplo, 100 milisegundos, significa que durante esos 100ms, la interrupción de SysTick (que ocurre cada 1ms) no puede ejecutarse.
+
+El sistema perdería 100 ticks. Los contadores de ticks dejarían de incrementarse, y toda la lógica basada en tiempo (como el antirrebote de 50ms o la actualización del LCD de 500ms) se rompería por completo. El sistema se "congelaría" intermitentemente.

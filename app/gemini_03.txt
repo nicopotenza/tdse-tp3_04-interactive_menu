@@ -1,0 +1,58 @@
+board.h
+Este archivo es una capa de abstracción de hardware (HAL - Hardware Abstraction Layer). Su propósito principal es independizar el código de la aplicación (como task_sensor.c) del hardware específico (la placa o board) que se esté utilizando.
+
+Selección de Placa: Define una macro BOARD (en este caso, NUCLEO_F103RC).
+
+Mapeo Condicional: Utiliza directivas de preprocesador (#if) para seleccionar un conjunto de definiciones de pines basándose en la macro BOARD.
+
+Definición de Alias: Para la placa seleccionada, crea alias "humanos" para los pines y sus estados lógicos. Por ejemplo:
+
+BTN_ENT_PIN se mapea a D10_Pin.
+
+BTN_ENT_PORT se mapea a D10_GPIO_Port.
+
+BTN_ENT_PRESSED (estado presionado) se define como GPIO_PIN_RESET, indicando que es un botón activo-bajo (conecta a GND al presionarse).
+
+Lo mismo ocurre para los otros botones (NEX, ESC) y el LED (LED_A).
+
+En resumen, permite que el resto del código escriba HAL_GPIO_ReadPin(BTN_ENT_PORT, BTN_ENT_PIN) en lugar de HAL_GPIO_ReadPin(D10_GPIO_Port, D10_Pin). Si se cambiara a otra placa (ej. una NUCLEO-F446RE), solo sería necesario cambiar la macro BOARD, y el código de la aplicación seguiría funcionando sin modificaciones.
+
+dwt.h
+Este archivo es un driver para el periférico DWT (Data Watchpoint and Trace) del núcleo ARM Cortex-M. Específicamente, controla el contador de ciclos de CPU (CYCCNT).
+
+Su propósito es ofrecer un temporizador de muy alta precisión (resolución de un ciclo de CPU) para medir tiempos de ejecución.
+
+Funciones Principales: Proporciona varias funciones static inline (que se insertan directamente en el código que las llama, similar a una macro).
+
+cycle_counter_init(): Habilita el contador de ciclos accediendo a los registros del núcleo (CoreDebug->DEMCR, DWT->CTRL) y lo resetea (DWT->CYCCNT = 0).
+
+cycle_counter_reset(): Reinicia el contador de ciclos a 0.
+
+cycle_counter_get(): Devuelve el valor "crudo" del contador, es decir, el número de ciclos de CPU transcurridos.
+
+cycle_counter_get_time_us(): Es la función más útil. Lee el contador de ciclos y lo convierte a microsegundos (µs) dividiéndolo por la frecuencia del sistema en MHz (SystemCoreClock / 1000000).
+
+Este driver es el que utiliza app.c para medir con precisión cuánto tarda cada tarea (task_sensor_update, task_menu_update) y así calcular el WCET (Worst-Case Execution Time).
+
+systick.c
+Este archivo implementa una función de retraso (delay) bloqueante que utiliza el temporizador SysTick del sistema, pero con precisión de microsegundos.
+
+Función: systick_delay_us(uint32_t delay_us):
+
+Cálculo del Objetivo: Calcula cuántos "ticks" del SysTick equivalen a los microsegundos solicitados (delay_us). Lo hace multiplicando los microsegundos por la frecuencia del reloj del núcleo en MHz (delay_us * (SystemCoreClock / 1000000UL)).
+
+Lectura Inicial: Obtiene el valor actual del contador SysTick (SysTick->VAL). Es importante notar que SysTick es un contador descendente (cuenta hacia cero).
+
+Bucle de Sondeo (Polling): Entra en un bucle while(1) que bloquea la ejecución del programa.
+
+Cálculo de Tiempo Transcurrido: Dentro del bucle, lee continuamente el valor current del SysTick y calcula cuántos ticks han pasado (elapsed).
+
+Manejo de Desbordamiento (Wrap-Around): El SysTick se recarga automáticamente cuando llega a cero. El código maneja esto:
+
+Si current <= start, el contador no se ha reiniciado: elapsed = start - current.
+
+Si current > start, el contador pasó por cero y se recargó: elapsed = SysTick->LOAD + start - current.
+
+Salida: Cuando el tiempo transcurrido (elapsed) es mayor o igual al objetivo (target), sale del bucle.
+
+A diferencia de HAL_Delay() (que usa la interrupción de SysTick y cede el control), esta función es un retraso por sondeo activo (busy-waiting). Se utiliza en display.c para generar las pausas muy cortas (ej. 1µs o 37µs) necesarias para la comunicación con el LCD, donde HAL_Delay(1) (1 milisegundo) sería un tiempo de espera excesivamente largo.
